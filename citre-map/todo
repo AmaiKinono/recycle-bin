@@ -1,0 +1,238 @@
+# User option
+
+-  An user option for case sensitivity.
+
+   We want "smart case fold", i.e. when doing prefix/substring match, if the
+   input chars are all downcase, do case insensitive search, otherwise do case
+   sensitive search.
+
+   We should offer an user option (`citre-smart-case-fold`) to choose from
+   "smart case fold" (`t`) and "always case sensitive" (`nil`).
+
+   When doing "exact match", we should always do case sensitive search.
+
+- An user option for enabling different features.
+
+  We should have a set of local variables to let the user decide which features
+  to enable.
+
+- Tags generation recipe system
+
+  Through such system, people can specify target name, target path (`nil` means
+  use output of ctags directly), ctags command (`nil` means use the command
+  built by Citre), which directories will make use of them (`nil` means the
+  whole project), and when should it be automatically updated (this is a list
+  of directories, when files in these dirs are saved, the tags file is
+  updated. `nil` means always, and `'no` means don't).
+
+  Ideally, we should do incremental update. I've seen some vim plugins that can
+  do this (so we must do better!). The basic idea is when saving, remove those
+  lines in the tags file that belongs to this file, than only scan this file
+  and use the "append" option to update. But here's a trap: when using
+  something like wgrep, we may save a lot of files at a time. We should use
+  some kind of lock to make this safe. Another thing is we need to modify the
+  command specified by the user to change the input files, and the command may
+  use a configuration file, then it's impossible to modify. Let's see if feed
+  files from stdin can override this. Or at least we can ask the user not to
+  specify input files in the command, and write them to the recipe instead.
+
+  We should design the system so configuring it for a simple project is easy,
+  at the same time it can serve for any large projects.
+
+# Functionality
+
+- Eldoc integration
+
+  Now I only have a vague idea. Maybe we can assume in non-lisp languages, we
+  call callable symbols like `symbol(arg1, arg2)` (notice the arg themselves
+  can also be in this form). We can parse backward from point, and see if the
+  symbol before `(` has `font-lock-function-name-face`. If so, we fetch the
+  "signature" field of it and show it.
+
+- Auto completion for "dot patterns"
+
+  We should come up with our own "symbol-at-point" function. By calling it we
+  get the symbol at point, and if the chars before it are ".", "->" or "::",
+  the symbol before these things. Then we can make use of "typeref" and "scope"
+  fields to get better completion results.
+
+  I can think of completing struct members now, but I want to support more "dot
+  patterns". I need to think of all (at least most of) the possibilities and
+  figure out what are those can be solved based on tags file.
+
+- Sort
+
+  We should come up with our own sort function, and not rely on the sorting of
+  ctags. We want a sort algorithm just like prescient.el, plus when required,
+  put the candidates with certain field contents before others.
+
+- A new jump to definition interface
+
+  Now we already have many flavors of "jump to definition":
+
+  - When you are coding and want to quickly see the docstring/definition of the
+    function: use `citre-peek`.
+  - When you want to read the definition in depth or modify it: xref or
+    `citre-jump`. What's neat about `citre-jump` is you can jump when you are
+    peeking.
+
+  But we still need to come up with an interface for people who read complex
+  source code for hours. I haven't noticed this requirement before, but there
+  are people who need this. Let's see what will Mr. Yamato will say about this.
+
+- Jump to definition from a dependency that's not in the root of current
+
+  Maybe this is not worth it, but it's nice in some situations. We need to
+  modify the project root detection method. If we can't detect the root, but
+  it's a dependency of an opening project (just check through recipes in
+  `citre--project-info-alist`), then set the root to be that project's root.
+  Then, after `citre-jump`, enable Citre mode, then the project root is set,
+  and we need to somehow know which are the targets it use (again, let the user
+  specify the input files for each target can be handy). If this can be done,
+  everything should work like usual.
+
+  Let me rethink this. We want to make sure these things works after jumping to
+  a definition that's not in the project root:
+
+  - If itself is a configured project, then everything should works. We can
+    confirm this by detecting tags file / tags generation recipe. Notice that
+    for the code map, they should still be treated as in the project we jump
+    from, or the history will lost. We can do this by a buffer-local
+    `citre--map-project-root` variable.
+
+  - If it isn't a configured project, then at least jumping to definition
+    should works so we can go really deep. My thought is just set its root to
+    the project we come from. This should work and the reason is long:
+
+    In future ctags will have the ability to automatically analyse the imported
+    modules in a file, so we'll have an `citre-common-dependency-alist` whose
+    keys are languages (maybe major modes, or file extensions), and values are
+    typical dependency/site-package directories of popular package
+    manager/virtualenvs. We can also explicitely specify the dependency
+    directories for a project. When using Citre, it will scan the current file,
+    find the tags in the tags file, and if there are still modules that's not
+    covered, find in dependency dirs (maybe an option for users who only wants
+    to use the tags file and not do further search). Now when we are in a file
+    that belongs to a project, but not in its root, we can do basically the
+    same thing, maybe get rid of the relative paths in
+    `citre-common-dependency-alist` and the specified dependencies since they
+    are for things in the project root.
+
+- imenu integration
+
+    Let ctags scan current file to generate imenu index. If the file is
+    modified, we could save it in a temp file first, but maybe this is a bit
+    overkill. Also, probably we don't want to generate a tags file, but it's
+    unclear how to pipe the ctags output to readtags. The "process
+    substitution" technique suggested below is one way to do this, but readtags
+    may be not guaranteed to read from a pipe in the future.
+
+# API
+
+- Rework the APIs so we can use readtags to do filtering based on any fields.
+
+  I'm not sure if we want to only keep tags with certain field values, or put
+  them before others (using the sort algorithm above). Since we actually don't
+  know the AST, there's chance we guessed the completely wrong type of "dot
+  pattern" and give the wrong results. So I think it's better to keep other
+  tags as well.
+
+  readtags can't read tags from stdin, one way I found is to use named pipe, it
+  functions like a file but is a pipe. Bash and some other shells can do
+  "process substitution", like this:
+
+  ```console
+  $ readtags -t <(ctags -R -f-) -l
+  ```
+
+  This is really neat, but not POSIX compatible. For POSIX compatible solution,
+  we can create a named pipe with a unique name first, and use it:
+
+  ```console
+  $ tmp=$(mktemp -u citre-temp-XXXX --tmpdir)
+  # I don't know why I can't write ctags output directly to this named pipe
+  # here. I have to redirect to it.
+  $ mkfifo $tmp && (ctags -R -f- > $tmp &) && readtags -t $tmp -l && rm $tmp
+  ... readtags output ...
+  ```
+
+  We could put them in one line, and that's pretty much a poor man's process
+  substitution.
+
+# Misc
+
+  - See where do the dependencies live in popular package/virtualenv managers,
+    and put them in the excluded patterns for large projects.
+
+  - put "*Test", "*_test" and "*-test" in excluded patterns. I need to see what
+    are the usual names.
+
+  - Add more faces.
+
+  - When calling `citre-jump` without symbol at point, ask for user input to
+    search for symbols.
+
+  - Signal an error when the needed fields are not presented.
+
+    We need to think carefully about this. Technically we only need the tag
+    itself for completion, and line number for various jumping commands. But
+    it's in the plan to make Citre give more accurate results based on various
+    informations, and we want to make use of the readtags program. It's better
+    to design this behavior after these changes. We need to figure out:
+
+   - Which are the fields needed for every user commands. Citre should fail
+     when the command is called, and the needed fields are not presented. I
+     think it's safe to assume a user would use both completion and jumping
+     functionalities, so Citre should fail while parsing, to make sure all
+     necessary fields are presented.
+
+   - Which are the fields that gives better experience/UI. We should put these
+     in the manual.
+
+  - Since in the future we'll know and scan imported modules for current file,
+    the "project size" thing doesn't really matter. We'll get rid of it. Then
+    `citre-mode` is not really necessary too, it has two uses:
+
+    - Set up the hooks/functions to offer integration with Emacs built-in
+      mechanisms.
+    - Write project information, including the size.
+
+    We require `citre-mode` to be enabled when using interactive commands,
+    because calculating the size may take a while. But in the future we could
+    create a procedure to write project information if it's not presented (it
+    will be fast since we don't need the size), then use it in all the
+    interactive commands, so they can be used when `citre-mode` is not enabled.
+
+    The keybindings in citre-peek is based on overriding the keybindings of
+    `citre-mode`. We should create its own minor mode and handle keybindings
+    using it.
+
+    And now there are 3 things that needs citre-mode: capf, xref, eldoc. For
+    the first two, we could create our own `citre-xref-find-definition` and
+    `citre-completion-at-point` functions, they let bind the necessary
+    variables and call xref/capf commands. In this way we could use all the
+    functionalities except eldoc integration without citre-mode. But maybe we
+    are going too far. If the user want this, they could wrap their own
+    commands.
+
+  - Some sequences (like tabs) are escaped in tags file. We need to figure out
+    how this is exactly down, and maybe do appropriate unescaping when parsing.
+    I believe they are mostly handled in the output of readtags, but we need to
+    confirm.
+
+    Ref: https://github.com/universal-ctags/libreadtags/issues/17 and
+    https://github.com/universal-ctags/ctags/pull/2459#issuecomment-597906216.
+
+  - We need a `citre-doctor`. It sees if the user is using universal ctags,
+    prints the current project root, and tags files in use.
+
+    If the user is using universal ctags, then we can look into the pseudo tags
+    and see if the output format is indeed u-ctags, and are the needed fields
+    presented in the tags files.
+
+# Selectrum integration
+
+We want selectrum versions of these commands:
+
+- `citre-jump-command`
+- `citre-completion-in-region-function`
